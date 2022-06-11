@@ -1,21 +1,23 @@
 import json
-import math
+from json import JSONEncoder
 import matplotlib
 import matplotlib.pyplot as plt
 import time
 import matplotlib.cm as cm
-#import numpy as np
+import numpy as np
 
-def percentile(data, perc: int):
-    size = len(data)
-    return sorted(data)[int(math.ceil((size * perc) / 100)) - 1]
+# taken from https://pynative.com/python-serialize-numpy-ndarray-into-json/
+class NumpyArrayEncoder(JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return JSONEncoder.default(self, obj)
 
 # obtains the base distribution stats for an array of numbers
 def getDistStats(x): 
     mean = sum(x)/len(x) # mean of x value (average x value)
-    var = 0
-    for xi in x: var += (xi - mean)**2 # variance of x (expectation of how much values deviate from the mean)
-    std = math.sqrt(var) # average value for how much a value deviates from the mean
+    var = sum((x - mean)**2) # variance of x (expectation of how much values deviate from the mean)
+    std = np.sqrt(var) # average value for how much a value deviates from the mean
     return {"Mean": mean, "Var": var, "Std": std}
 
 def player_prompt():
@@ -72,7 +74,7 @@ def outliers(player, data):
         lower, upper = [0, 0]
         if pts_stats['Std'] > pts_stats['Mean']:
             print(f"The standard devition of {player}'s points scored is greater than the mean thus we will remove the outliers via the IQR technique")
-            q25, q75 = percentile(y, 25), percentile(y, 75)
+            q25, q75 = np.percentile(y, 25), np.percentile(y, 75)
             iqr = q75 - q25
             # calculate the outlier cutoff
             cut_off = iqr * 1.5
@@ -86,16 +88,19 @@ def outliers(player, data):
         print(f"Outliers with point values: {outliers.values()} removed.")
 
         # remove outliers from data set (pts and mins array)
-        for idx in outliers.keys(): # tr stands for trimmed
-            del y[idx]
-            del x[idx]
-            del seasons[idx]
+        for idx in outliers.keys(): 
+            y = np.delete(y, idx)
+            x = np.delete(x, idx)
+            seasons = np.delete(seasons, idx)
+
+        data = {"mins": x, "pts": y, "seasons": seasons}
 
         print("Saving new trimmed Pts vs. Time played plot:")
         display_ptsVmin(f'{player}_trimmed', data)#{'mins':x, 'pts': y, 'seasons':seasons})
 
     else: print("No outliers removed")
     print('\n')
+    return data
 
 def extract_vars(player, data):
     mins = data['mins']
@@ -127,7 +132,7 @@ def extract_vars(player, data):
                 #display_ptsVvar(player, {'mins':mins, 'pts': y, 'seasons':seasons}, sel_var)
                 print(f"{player}_PtsV{sel_var}.jpg downloaded\n")
 
-        except ValueError as error: end_download_dists = True
+        except ValueError: end_download_dists = True
 
     print('\n')
 
@@ -135,11 +140,11 @@ def extract_vars(player, data):
     user_input = ''
     valid_input = False
     while not valid_input and user_input != 'q':
-        print("Input a list of your desired predictor variables seperated by commas (,). Exponential: x^#, Log: x_log#, Div: x/# (To multiply var divide by 1/# and enter in decimal form 0.#).")
+        print("Input a list of your desired predictor variables seperated by commas (,). Exponential: x^#, Logarithmic: x_log, Interactive: x_y_z_int, Div: x/# (To multiply var divide by 1/# and enter in decimal form 0.#).")
         idx = 0
         for var in available_vars:
             if idx > 26: # if we have more than 26 vars then reuse alph for vars but add number to end (based on how many times we have used alphabet)
-                print(f"{var}: {alphabet[(idx%26)-1] + str(math.floor(idx/26)+1)}")
+                print(f"{var}: {alphabet[(idx%26)-1] + str(np.floor(idx/26)+1)}")
             else: print(f"{var}: {alphabet[idx]}")
             idx += 1 
         # ex input: a, a^2, b, a2, 2b, log2_c 
@@ -154,17 +159,40 @@ def extract_vars(player, data):
                 var_idx = alphabet.index(str_var[0]) # default take index of first char in string (usually (wont be more than 26 vars))
                 if len(str_var) > 1: var_idx = alphabet.index(str_var[0]) + (int(str_var[1:])-1)*26 # ex b2 = 1 + (2-1)*26 = 27
                 sel_var = available_vars[var_idx]
-                if '^' in var: X.append([float(val)**float(var.split('^')[1]) for val in data.get(sel_var)]) # each val in var array exponentially multiplied by var.split('^')[1] 
-                elif 'log' in var: X.append([math.log(float(val), int(var.split('log')[1])) for val in data.get(sel_var)]) # each val in var array logged with base var.split('log')[1] 
-                elif '/' in var: X.append([float(val)/float(var.split('/')[1]) for val in data.get(sel_var)]) # each val in var array divided by var.split('/')[1]
+                sel_data = data.get(sel_var)
+                if '^' in var: X.append(sel_data**float(var.split('^')[1])) # each val in var array exponentially multiplied by var.split('^')[1] 
+                    #X.append([float(val)**float(var.split('^')[1]) for val in data.get(sel_var)]) # each val in var array exponentially multiplied by var.split('^')[1] 
+                elif 'log' in var: X.append(np.log(sel_data + 1) / np.log(int(var.split('log')[1]))) # (adding 1 to avoid log(zero)) also using log base change rule to get custom log base from int(var.split('log')[1]) 
+                    #X.append([np.log(float(val), int(var.split('log')[1])) for val in data.get(sel_var)]) # each val in var array logged with base var.split('log')[1]
+                elif 'int' in var: 
+                    curr_var = var.split('_')[1]
+                    curr_idx = 2
+                    int_vars = [] # will not include prev var_idx as we already have sel_data
+
+                    while curr_var != 'int': # split entire var entry until we have list of all the vars to multiply. Ex: a2_b_c2_int, = [a2, b, c2] int_vars = [26, 1, 28]
+                        var_idx = alphabet.index(curr_var[0]) 
+                        if len(curr_var) > 1: var_idx += (int(curr_var[1:])-1)*26 # ex b2 = 1 + (2-1)*26 = 27 # this part only runs if we have alphabet var with number after (curr_var[1:] returns '' for single letter)
+                        int_vars.append(var_idx)
+                        curr_var = var.split('_')[curr_idx]
+                        curr_idx += 1
+
+                    final_data = sel_data
+
+                    for int_var in int_vars:
+                        final_data *= data.get(available_vars[int_var])
+
+                    X.append(final_data)
+
+                elif '/' in var: X.append(sel_data / float(var.split('/')[1])) # array divided by var.split('/')[1]
+                    #X.append([float(val)/float(var.split('/')[1]) for val in data.get(sel_var)]) # each val in var array divided by var.split('/')[1]
                 else: X.append(data.get(sel_var)) # add the vars array into the X array (no transformation applied)
             valid_input = True
             X_filename = input("Input the name for the X variables list json file (.json will already be included): ")
             y_filename = input("Input the file name for the pts list json file or enter n to not download the pts json file: ")
-            with open(X_filename+'.json', 'w') as f: json.dump(X, f)
+            with open(X_filename+'.json', 'w') as f: json.dump(X, f, cls=NumpyArrayEncoder)
             print(f"{X_filename}.json saved")
             if y_filename != 'n': 
-                with open(y_filename+'.json', 'w') as f: json.dump(y, f) 
+                with open(y_filename+'.json', 'w') as f: json.dump(y, f, cls=NumpyArrayEncoder) 
                 print(f"{y_filename}.json saved")
 
 
@@ -183,14 +211,14 @@ def main():
             pts.append(int(game['Player']['Pts']))
             seasons_arr.append(int(season.split('-')[0])) 
 
+    mins, pts, seasons_arr = np.array(mins), np.array(pts), np.array(seasons_arr)
+
     data = {"mins": mins, "pts": pts, "seasons": seasons_arr}
 
     print("Saving players pts vs time played jpg...\n")
 
     display_ptsVmin(player, data)
-    print(len(data['seasons']))
-    outliers(player, data)
-    print(len(data['seasons']))
+    data = outliers(player, data)
     extract_vars(player, data)
 
 
